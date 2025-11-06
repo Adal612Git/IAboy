@@ -4,9 +4,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api.routes import router
+from .api.routes import get_manager, router
 from .core.config import get_settings
-from .services.game_session import registry
 
 
 settings = get_settings()
@@ -25,4 +24,5 @@ app.include_router(router, prefix=settings.api_prefix)
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    registry.shutdown()
+    manager = get_manager()
+    manager.shutdown()
