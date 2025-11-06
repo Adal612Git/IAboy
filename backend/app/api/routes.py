@@ -1,150 +1,154 @@
-"""API router definition for the IAboy backend."""
+"""FastAPI routes exposing the PyBoy emulator backend."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from functools import lru_cache
+from pathlib import Path
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..core.config import Settings, get_settings
-from ..models.messages import (
-    ConversationRequest,
-    ConversationResponse,
-    CreateSessionRequest,
+from ..emulator import EmulatorManager, build_emulator_config
+from ..emulator.session import EmulatorSession
+from ..models.emulator_api import (
+    GameStatePayload,
+    HealthResponse,
+    ListSessionsResponse,
     LoadStateRequest,
+    LoadStateResponse,
+    ResetRequest,
+    ResetResponse,
     SaveStateResponse,
-    SessionResponse,
+    StartEmulationRequest,
+    StartEmulationResponse,
+    StateResponse,
     StepRequest,
     StepResponse,
 )
-from ..services.ai_client import GemmaClient
-from ..services.game_session import registry
 
 router = APIRouter()
 
 
-async def get_gemma_client():
-    client = GemmaClient()
-    try:
-        yield client
-    finally:
-        await client.close()
+@lru_cache()
+def _build_manager(settings: Settings) -> EmulatorManager:
+    config = build_emulator_config(settings)
+    return EmulatorManager(config)
 
 
-@router.get("/health")
-def healthcheck(settings: Settings = Depends(get_settings)) -> dict[str, str]:
-    """Simple endpoint used by the frontend to verify server status."""
-
-    return {"status": "ok", "model": settings.ollama_model}
+def get_manager(settings: Settings = Depends(get_settings)) -> EmulatorManager:
+    return _build_manager(settings)
 
 
-@router.get("/games")
-def list_games(settings: Settings = Depends(get_settings)) -> dict[str, list[str]]:
-    return {"games": settings.available_games}
-
-
-@router.post("/sessions", response_model=SessionResponse)
-def create_session(payload: CreateSessionRequest) -> SessionResponse:
-    try:
-        session = registry.create(
-            game_id=payload.game_id,
-            description_prompt=payload.description_prompt,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    return SessionResponse(session_id=session.session_id, game_id=session.game_id, mode=payload.mode)
-
-
-@router.post("/sessions/{session_id}/step", response_model=StepResponse)
-async def step_session(
-    session_id: str,
-    payload: StepRequest,
-    client: GemmaClient = Depends(get_gemma_client),
-) -> StepResponse:
-    try:
-        session = registry.get(session_id)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
-    action_label = payload.player_action
-    if payload.use_ai:
-        prompt = _build_action_prompt(
-            observation_summary=session.render_observation(),
-            action_labels=session.action_labels,
-            game_id=session.game_id,
-            player_action=payload.player_action,
-        )
-        action_label = await client.generate_action(prompt)
-
-    if action_label is None:
-        raise HTTPException(status_code=400, detail="No hay acción definida para ejecutar.")
-
-    action_index = _resolve_action_index(action_label, session)
-    try:
-        result = session.step(action_index)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    return StepResponse(**result)
-
-
-@router.post("/sessions/{session_id}/save", response_model=SaveStateResponse)
-def save_session_state(session_id: str) -> SaveStateResponse:
-    try:
-        session = registry.get(session_id)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
-    path = session.save_state()
-    return SaveStateResponse(success=True, path=path)
-
-
-@router.post("/sessions/{session_id}/load", response_model=SaveStateResponse)
-def load_session_state(session_id: str, payload: LoadStateRequest) -> SaveStateResponse:
-    try:
-        session = registry.get(session_id)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
-    session.load_state(payload.path)
-    return SaveStateResponse(success=True, path=payload.path)
-
-
-@router.post("/sessions/{session_id}/chat", response_model=ConversationResponse)
-async def chat_with_ai(
-    session_id: str,
-    payload: ConversationRequest,
-    client: GemmaClient = Depends(get_gemma_client),
-) -> ConversationResponse:
-    try:
-        registry.get(session_id)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
-    formatted_messages = [message.dict() for message in payload.messages]
-    reply = await client.generate_chat_reply(formatted_messages)
-    return ConversationResponse(reply=reply)
-
-
-def _resolve_action_index(action_label: str, session) -> int:
-    try:
-        return session.action_labels.index(action_label)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=f"Acción desconocida: {action_label}") from error
-
-
-def _build_action_prompt(
-    *,
-    observation_summary: str,
-    action_labels: list[str],
-    game_id: str,
-    player_action: str | None,
-) -> str:
-    base_prompt = (
-        "Eres Gemma 2, un jugador cooperativo que participa en juegos retro junto a un humano. "
-        "Debes responder con una acción válida del controlador usando el mismo formato devuelto por la API."
+@router.post("/start", response_model=StartEmulationResponse)
+def start_emulation(
+    payload: StartEmulationRequest,
+    manager: EmulatorManager = Depends(get_manager),
+) -> StartEmulationResponse:
+    session = manager.start_session(payload.rom_path)
+    state_payload = _to_state_payload(session.current_state())
+    response = StartEmulationResponse(
+        session_id=session.session_id,
+        state=state_payload,
+        action_labels=list(session.action_labels),
+        config=session.config.to_dict(),
     )
-    details = [
-        f"Observación: {observation_summary}",
-        f"Acciones disponibles: {', '.join(action_labels)}",
-        f"Juego actual: {game_id}",
-    ]
-    if player_action:
-        details.append(f"El humano sugiere: {player_action}")
-    return "\n".join([base_prompt, *details])
+    return response
+
+
+@router.post("/step", response_model=StepResponse)
+def step_emulation(
+    payload: StepRequest,
+    manager: EmulatorManager = Depends(get_manager),
+) -> StepResponse:
+    session = _get_session(manager, payload.session_id)
+    try:
+        result = session.step(payload.action)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    response = StepResponse(session_id=session.session_id, **result.to_payload())
+    return response
+
+
+@router.get("/state", response_model=StateResponse)
+def get_state(
+    session_id: str = Query(..., description="Identifier of the emulator session."),
+    manager: EmulatorManager = Depends(get_manager),
+) -> StateResponse:
+    session = _get_session(manager, session_id)
+    state_payload = _to_state_payload(session.current_state())
+    return StateResponse(session_id=session.session_id, state=state_payload)
+
+
+@router.post("/reset", response_model=ResetResponse)
+def reset_session(
+    payload: ResetRequest,
+    manager: EmulatorManager = Depends(get_manager),
+) -> ResetResponse:
+    session = _get_session(manager, payload.session_id)
+    state = session.reset()
+    return ResetResponse(session_id=session.session_id, state=_to_state_payload(state))
+
+
+@router.get("/health", response_model=HealthResponse)
+def get_health(
+    session_id: Optional[str] = Query(
+        None,
+        description="When provided returns health metrics for a specific session."
+        " Otherwise returns global configuration data.",
+    ),
+    manager: EmulatorManager = Depends(get_manager),
+) -> HealthResponse:
+    if session_id:
+        session = _get_session(manager, session_id)
+        return HealthResponse(
+            session_id=session.session_id,
+            health=session.current_health(),
+            config=session.config.to_dict(),
+        )
+    return HealthResponse(
+        session_id=None,
+        health={"status": "ok"},
+        config=manager.config.to_dict(),
+    )
+
+
+@router.post("/save", response_model=SaveStateResponse)
+def save_state(
+    payload: ResetRequest,
+    manager: EmulatorManager = Depends(get_manager),
+) -> SaveStateResponse:
+    session = _get_session(manager, payload.session_id)
+    path = session.save_state()
+    return SaveStateResponse(session_id=session.session_id, path=str(path))
+
+
+@router.post("/load", response_model=LoadStateResponse)
+def load_state(
+    payload: LoadStateRequest,
+    manager: EmulatorManager = Depends(get_manager),
+) -> LoadStateResponse:
+    session = _get_session(manager, payload.session_id)
+    rom_path = Path(payload.path)
+    if not rom_path.exists():
+        raise HTTPException(status_code=404, detail=f"El archivo {rom_path} no existe.")
+    state = session.load_state(rom_path)
+    return LoadStateResponse(
+        session_id=session.session_id,
+        state=_to_state_payload(state),
+    )
+
+
+@router.get("/sessions", response_model=ListSessionsResponse)
+def list_sessions(manager: EmulatorManager = Depends(get_manager)) -> ListSessionsResponse:
+    return ListSessionsResponse(sessions=[session.session_id for session in manager.list_sessions()])
+
+
+def _get_session(manager: EmulatorManager, session_id: str) -> EmulatorSession:
+    try:
+        return manager.get_session(session_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+def _to_state_payload(state) -> GameStatePayload:
+    return GameStatePayload.parse_obj(state.to_payload())

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 from pydantic import BaseSettings, Field, validator
 
@@ -32,15 +32,58 @@ class Settings(BaseSettings):
         description="Directory where game save states are stored.",
     )
     frame_skip: int = Field(
-        4,
+        1,
+        ge=1,
         description=(
-            "Number of emulator frames to skip between observations to reduce the "
-            "amount of data sent to the LLM."
+            "Number of emulator ticks executed for each requested step. A value of 1 "
+            "keeps the emulation perfectly synchronised with client commands."
         ),
+    )
+    autosave_interval_steps: int = Field(
+        120,
+        ge=1,
+        description="How many steps to wait before persisting an automatic save state.",
+    )
+    health_check_interval_steps: int = Field(
+        1,
+        ge=1,
+        description=(
+            "Frequency (in steps) at which the health monitor validates captured frames."
+        ),
+    )
+    max_consecutive_health_failures: int = Field(
+        3,
+        ge=1,
+        description="Number of failed health checks tolerated before recovery is triggered.",
+    )
+    frame_dimensions: Tuple[int, int, int] = Field(
+        (144, 160, 3),
+        description="Expected frame dimensions produced by the Game Boy emulator.",
+    )
+    default_rom: Optional[str] = Field(
+        None,
+        description=(
+            "Optional default ROM filename used when clients start the emulator without "
+            "specifying a target."
+        ),
+    )
+    memory_watch_addresses: Dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Dictionary of symbolic names mapped to memory addresses that should be "
+            "sampled on each step to compute rewards and high level game metrics."
+        ),
+    )
+    rom_extensions: Tuple[str, ...] = Field(
+        (".gb", ".gbc"),
+        description="Accepted ROM file extensions for the PyBoy emulator backend.",
     )
     available_games: List[str] = Field(
         default_factory=list,
-        description="List of ROM identifiers supported by default.",
+        description=(
+            "Backwards-compatible list of detected ROM identifiers. The PyBoy backend "
+            "does not enforce this whitelist and accepts any valid Game Boy ROM file."
+        ),
     )
 
     class Config:
