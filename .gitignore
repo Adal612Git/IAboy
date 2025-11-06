@@ -1,1 +1,9 @@
-__pycache__/\n.env\nvenv/
+__pycache__/
+*.pyc
+.env
+save_states/
+roms/
+node_modules/
+frontend/dist/
+.vscode/
+.DS_Store
