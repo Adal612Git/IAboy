@@ -20,7 +20,7 @@ class Settings(BaseSettings):
         description="Base URL of the local Ollama service hosting Gemma 2.",
     )
     ollama_model: str = Field(
-        "gemma2:2b",
+        "gemma2:9b",
         description="Name of the Gemma 2 model served by Ollama.",
     )
     roms_path: Path = Field(
@@ -39,16 +39,12 @@ class Settings(BaseSettings):
         ),
     )
     available_games: List[str] = Field(
-        default_factory=lambda: [
-            "SuperMarioBros-Nes",
-            "SonicTheHedgehog-Genesis",
-            "PokemonRed-GameBoy",
-        ],
+        default_factory=list,
         description="List of ROM identifiers supported by default.",
     )
 
     class Config:
-        env_file = ".env"
+        env_file = "../.env"
         case_sensitive = False
 
     @validator("roms_path", "save_states_path", pre=True)
@@ -58,6 +54,15 @@ class Settings(BaseSettings):
         path = Path(value).expanduser().resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    @validator("available_games", always=True)
+    def _load_available_games(cls, v: list[str], values: dict) -> list[str]:
+        """Scan the configured ROMs path to discover available games."""
+
+        roms_path = values.get("roms_path")
+        if roms_path and roms_path.is_dir():
+            return sorted([p.stem for p in roms_path.glob("*") if p.is_file()])
+        return v
 
 
 @lru_cache()
